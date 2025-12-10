@@ -1,0 +1,104 @@
+name: Sync Staging to Dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (just check for conflicts)'
+        required: false
+        default: 'false'
+        type: boolean
+
+  schedule:
+    - cron: '0 9 * * 1-5'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.CODEOWNER_PAT }}
+
+      - name: Check if sync needed
+        id: diff-check
+        run: |
+          git fetch origin dev staging
+          DIFF=$(git rev-list --count origin/dev..origin/staging)
+          echo "commits_behind=$DIFF" >> $GITHUB_OUTPUT
+          echo "📊 Dev is $DIFF commits behind staging"
+          if [ "$DIFF" -eq "0" ]; then
+            echo "needs_sync=false" >> $GITHUB_OUTPUT
+          else
+            echo "needs_sync=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Exit if no sync needed
+        if: steps.diff-check.outputs.needs_sync == 'false'
+        run: |
+          echo "✅ dev is already up to date with staging"
+
+      - name: Check for conflicts
+        if: steps.diff-check.outputs.needs_sync == 'true'
+        id: conflict-check
+        run: |
+          git config user.name "sync-bot"
+          git config user.email "sync-bot@users.noreply.github.com"
+          
+          git checkout dev
+          
+          if git merge origin/staging --no-commit --no-ff 2>/dev/null; then
+            echo "has_conflicts=false" >> $GITHUB_OUTPUT
+            echo "✅ No conflicts detected"
+            git merge --abort 2>/dev/null || true
+          else
+            echo "has_conflicts=true" >> $GITHUB_OUTPUT
+            echo "❌ Conflicts detected"
+            git merge --abort 2>/dev/null || true
+          fi
+
+      - name: Handle conflicts
+        if: steps.diff-check.outputs.needs_sync == 'true' && steps.conflict-check.outputs.has_conflicts == 'true'
+        run: |
+          echo "::error::❌ Merge conflicts detected between staging and dev"
+          echo ""
+          echo "To resolve locally:"
+          echo "  git fetch origin"
+          echo "  git checkout dev"
+          echo "  git merge origin/staging"
+          echo "  # resolve conflicts"
+          echo "  git push origin dev"
+          exit 1
+
+      - name: Exit if dry run
+        if: steps.diff-check.outputs.needs_sync == 'true' && inputs.dry_run == 'true'
+        run: |
+          echo "✅ Dry run complete. No conflicts."
+          echo "📊 Commits to sync: ${{ steps.diff-check.outputs.commits_behind }}"
+
+      - name: Create Pull Request
+        if: steps.diff-check.outputs.needs_sync == 'true' && steps.conflict-check.outputs.has_conflicts == 'false' && inputs.dry_run != 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.CODEOWNER_PAT }}
+          branch: auto/staging-to-dev-${{ github.run_number }}
+          base: dev
+          title: "chore: sync staging → dev"
+          body: |
+            ## 🔄 Automated Sync PR
+            
+            Syncing `staging` into `dev`.
+            
+            **Commits to sync:** ${{ steps.diff-check.outputs.commits_behind }}
+            
+            ---
+            
+            ✅ Anyone can approve this PR
+            
+            _Created automatically by sync workflow_
+          labels: |
+            automated
+            sync
+          delete-branch: true
