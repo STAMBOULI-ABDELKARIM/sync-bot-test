@@ -21,12 +21,18 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.CODEOWNER_PAT }}
+          ref: dev  # Checkout dev branch directly
+
+      - name: Setup Git
+        run: |
+          git config user.name "sync-bot"
+          git config user.email "sync-bot@users.noreply.github.com"
 
       - name: Check if sync needed
         id: diff-check
         run: |
-          git fetch origin dev staging
-          DIFF=$(git rev-list --count origin/dev..origin/staging)
+          git fetch origin staging
+          DIFF=$(git rev-list --count HEAD..origin/staging)
           echo "commits_behind=$DIFF" >> $GITHUB_OUTPUT
           echo "📊 Dev is $DIFF commits behind staging"
           if [ "$DIFF" -eq "0" ]; then
@@ -44,11 +50,6 @@ jobs:
         if: steps.diff-check.outputs.needs_sync == 'true'
         id: conflict-check
         run: |
-          git config user.name "sync-bot"
-          git config user.email "sync-bot@users.noreply.github.com"
-          
-          git checkout dev
-          
           if git merge origin/staging --no-commit --no-ff 2>/dev/null; then
             echo "has_conflicts=false" >> $GITHUB_OUTPUT
             echo "✅ No conflicts detected"
@@ -77,6 +78,11 @@ jobs:
         run: |
           echo "✅ Dry run complete. No conflicts."
           echo "📊 Commits to sync: ${{ steps.diff-check.outputs.commits_behind }}"
+
+      - name: Merge staging into dev branch
+        if: steps.diff-check.outputs.needs_sync == 'true' && steps.conflict-check.outputs.has_conflicts == 'false' && inputs.dry_run != 'true'
+        run: |
+          git merge origin/staging --no-ff -m "chore: merge staging into dev"
 
       - name: Create Pull Request
         if: steps.diff-check.outputs.needs_sync == 'true' && steps.conflict-check.outputs.has_conflicts == 'false' && inputs.dry_run != 'true'
